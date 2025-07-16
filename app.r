@@ -48,10 +48,10 @@ convertir_fecha_segura <- function(fecha_col) {
 }
 
 # 🔷 Función general
-buscar_pdfs_sharepoint <- function(tenant_id,client_id,client_secret,dominio,sitio,patron) {
+buscar_pdfs_sharepoint <- function(tenant_id, client_id, client_secret, dominio, sitio, patron) {
 	# 🔑 Autenticación
 	cat("🔑 Autenticando…\n")
-		token <- get_azure_token(
+	token <- get_azure_token(
 		resource = "https://graph.microsoft.com",
 		tenant   = tenant_id,
 		app      = client_id,
@@ -90,13 +90,69 @@ buscar_pdfs_sharepoint <- function(tenant_id,client_id,client_secret,dominio,sit
 	)
 	resp <- GET(url, headers)
 	result <- content(resp, as = "parsed", type = "application/json")
+
 	if (!is.null(result$value) && length(result$value) > 0) {
-		archivos <- sapply(result$value, function(x) x$webUrl)
-		pdfs <- archivos[grepl("\\.pdf$", archivos, ignore.case = TRUE)]
-		cat("✅ Se encontraron ", length(pdfs), " PDFs.\n")
+		# capturar id, name y webUrl
+		archivos <- lapply(result$value, function(x) {
+			list(id = x$id, name = x$name, webUrl = x$webUrl)
+		})
+		archivos_df <- do.call(rbind, lapply(archivos, as.data.frame))
+		pdfs <- archivos_df[grepl("\\.pdf$", archivos_df$name, ignore.case = TRUE), ]
+		cat("✅ Se encontraron ", nrow(pdfs), " PDFs.\n")
 		return(pdfs)
 	} else {
 		cat("⚠️ No se encontraron PDFs para el patrón indicado.\n")
+		return(NULL)
+	}
+}
+
+
+descargar_pdf_sharepoint <- function(tenant_id, client_id, client_secret,dominio, sitio, archivo_id, destino) {
+	cat("🔑 Autenticando…\n")
+	token <- get_azure_token(
+		resource = "https://graph.microsoft.com",
+		tenant   = tenant_id,
+		app      = client_id,
+		password = client_secret
+	)
+
+	access_token <- token$credentials$access_token
+	headers <- add_headers(
+		Authorization = paste("Bearer", access_token)
+	)
+
+	# 🌐 site_id
+	site_info <- GET(
+		url = paste0("https://graph.microsoft.com/v1.0/sites/", dominio, ":/sites/", sitio),
+		headers
+	)
+	site_id <- content(site_info, as = "parsed", type = "application/json")$id
+	cat("✅ site_id: ", site_id, "\n")
+
+	# 💾 drive_id
+	drive_info <- GET(
+		url = paste0("https://graph.microsoft.com/v1.0/sites/", site_id, "/drive"),
+		headers
+	)
+	drive_id <- content(drive_info, as = "parsed", type = "application/json")$id
+	cat("✅ drive_id: ", drive_id, "\n")
+
+	# 📥 Descargar archivo
+	cat("📥 Descargando archivo con id: ", archivo_id, "\n")
+	resp <- GET(
+		url = paste0(
+			"https://graph.microsoft.com/v1.0/drives/", drive_id,
+			"/items/", archivo_id, "/content"
+		),
+		headers,
+		write_disk(destino, overwrite = TRUE)
+	)
+
+	if (status_code(resp) == 200) {
+		cat("✅ Archivo descargado en: ", destino, "\n")
+		return(destino)
+	} else {
+		cat("❌ Error al descargar archivo\n")
 		return(NULL)
 	}
 }
@@ -815,6 +871,7 @@ server <- function(input, output, session) {
 			datos_reactivos <- reactiveVal(NULL)
 			historico_reactivo <- reactiveVal(NULL)
 			resultado_consulta_uni <- reactiveVal(NULL)
+			pdfs_encontrados <- reactiveVal(NULL)
 
 			
 			datos_hist <- consulta_Gestion()
@@ -1004,7 +1061,8 @@ server <- function(input, output, session) {
 									selected = NULL,
 									width = "100%"
 								),
-								actionButton("btn_aplicar_doc", "Aplicar", icon = icon("search"), class = "boton-3d",width = "100%")
+								actionButton("btn_aplicar_doc", "Aplicar", icon = icon("search"), class = "boton-3d",width = "100%"),
+								actionButton("btn_buscar_pdfs", "Buscar PDFs",icon = icon("search"), class = "boton-3d",width = "100%")
 							),
 							column(10,
 								conditionalPanel(
@@ -1028,6 +1086,11 @@ server <- function(input, output, session) {
 										class = "box-naranja"
 									)
 								)
+							)
+						),
+						fluidRow(
+							column(12,
+								uiOutput("resultado_busqueda_pdfs")
 							)
 						)						
 					)
@@ -1300,7 +1363,55 @@ server <- function(input, output, session) {
 				updateSelectizeInput(session, "filtro_estado_aportante", selected = "Todos")
 				updateSelectizeInput(session, "filtro_tipo_aportante", selected = "Todos")
 			})
-		
+			
+			observeEvent(input$btn_buscar_pdfs, {
+				req(input$filtro_doc_historico)
+
+				showModal(modalDialog("Buscando PDFs, por favor espera…", footer = NULL))
+
+				pdfs <- buscar_pdfs_sharepoint(
+					tenant_id     = "jkjhkhjk3713e74b",
+					client_id     = "jhkjhkj83",
+					client_secret = "CjhkhkjjVczy",
+					dominio       = "niyarakycomco.sharepoint.com",
+					sitio         = "NiyarakyCompartida",
+					patron        = input$filtro_doc_historico
+				)
+
+				removeModal()
+
+				if (is.null(pdfs) || length(pdfs) == 0) {
+					showModal(modalDialog(
+						title = "Resultado",
+						"⚠️ No se encontraron PDFs para el patrón ingresado.",
+						easyClose = TRUE
+					))
+				} else {
+				  showModal(modalDialog(
+					title = "PDFs encontrados",
+					tagList(
+					  tags$div(
+						style = "max-height: 400px; overflow-y: auto; word-wrap: break-word; padding: 10px;",
+						lapply(1:nrow(pdfs), function(i) {
+						  tags$p(
+							tags$a(
+							  href = pdfs$webUrl[i],
+							  download = NA,
+							  target = "_blank",
+							  style = "color: #337ab7; text-decoration: underline; word-break: break-all;",
+							  pdfs$name[i]
+							)
+						  )
+						})
+					  )
+					),
+					easyClose = TRUE
+				  ))
+				}
+
+
+			})
+
 
 			######### Descargar Detalle ##################
 
