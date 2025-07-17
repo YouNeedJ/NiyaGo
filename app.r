@@ -2883,4 +2883,3 @@ server <- function(input, output, session) {
 # ----------------------- Lanzar app ----------------------- #
 
 shinyApp(ui = ui, server = server)# Cargar librerias
-
